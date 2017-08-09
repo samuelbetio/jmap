@@ -1,0 +1,404 @@
+# Structured data exchange
+
+The client may make an API request to the server to get or set structured data. This request consists of an ordered series of method calls. These are processed by the server, which then returns an ordered series of responses.
+
+## Making an API request
+
+To make an API request, the client makes an authenticated POST request to the API URL; see the Authentication section of the spec for how to discover this URL and how to authenticate requests.
+
+The request MUST have a content type of `application/json` and be encoded in UTF-8.
+
+The server SHOULD respond with one of the following HTTP response codes:
+
+### 200: OK
+
+The API request was successful. The response will be of type `application/json` and consists of the response to the API calls, as described below.
+
+### 400: Bad Request
+
+The request was malformed. For example, it may have had the wrong content type, or have had a JSON object that did not conform to the API calling structure (see *The structure of an API request* below). The client SHOULD NOT retry the same request. There is no content in the response.
+
+### 401: Unauthorized
+
+The `Authorization` header was missing or did not contain a valid token. Reauthenticate and then retry the request. As per the HTTP spec, the response MUST have a `WWW-Authenticate` header listing the available authentication schemes. There is no content in the response.
+
+### 404: Not Found
+
+The API endpoint has moved. See the Authentication section of the spec for how to rediscover the current URL to use. There is no content in the response.
+
+### 413: Payload Too Large
+
+Returned if the client makes a request with more method calls than the server is willing to accept in a single request, or if the total bytes of the request is larger than the max size the server is willing to accept.
+
+### 429: Rate limited
+
+Returned if the client has made too many requests recently, or has too many concurrent requests currently in progress. Clients SHOULD wait a while then try again. The response MAY include a `Retry-After` header indicating how long to wait before making a new request.
+
+### 500: Internal Server Error
+
+Something has gone wrong internally, and the server is in a broken state. Don't automatically retry. There is no content in the response.
+
+### 503: Service Unavailable
+
+The server is currently down. Try again later with exponential backoff. There is no content in the response.
+
+## The structure of an API request
+
+The client initiates an API request by sending the server a JSON array. Each element in this array is another array representing a method invocation on the server. The server will process the method calls and return a response consisting of an array in the same format. Each method call always contains three elements:
+
+1. The **name** of the method to call, or the name of the response from the server. This is a `String`.
+2. An `Object` containing *named* **arguments** for that method or response.
+3. A **client id**: an arbitrary `String` to be echoed back with the responses emitted by that method call (as we'll see lower down, a method may return 1 or more responses, as some methods make implicit calls to other ones).
+
+Example query:
+
+    [
+      ["method1", {"arg1": "arg1data", "arg2": "arg2data"}, "#1"],
+      ["method2", {"arg1": "arg1data"}, "#2"],
+      ["method3", {}, "#3"]
+    ]
+
+The method calls MUST be processed sequentially, in order. Each API request
+(which, as shown, may contain multiple method calls) receives a JSON
+response in exactly the same format. The output of the methods MUST be added
+to the array in the same order as the methods are processed.
+
+Example response:
+
+    [
+      ["responseFromMethod1", {"arg1": 3, "arg2": "foo"}, "#1"],
+      ["responseFromMethod2", {"isBlah": true}, "#2"],
+      ["anotherResponseFromMethod2", {
+        "data": 10,
+        "yetmoredata": "Hello"
+      }, "#2"],
+      ["aResponseFromMethod3", {}, "#3"]
+    ]
+
+## Errors
+
+If the data sent as an API request is not valid JSON or does not match the structure above, an error will be returned at the transport level. For example, when using JMAP over HTTP, a `400 Bad Request` error will be returned at the HTTP level.
+
+Possible errors for each method are specified in the method descriptions. If a method encounters an error, the appropriate `error` response MUST be inserted at the current point in the output array and, unless otherwise specified, further processing MUST NOT happen within that method call.
+
+Any further method calls in the request MUST then be processed as normal.
+
+An `error` response looks like this:
+
+    ["error", {
+      type: "unknownMethod"
+    }, "client-id"]
+
+The response name is `error`, and it has a type property as specified in the method description. Other properties may be present with further information; these are detailed in the method descriptions where appropriate.
+
+Any method MAY return an error of type `serverError` if an unexpected or unknown error occurs during the processing of that call. The state of the server after such an error is undefined.
+
+If an unknown method is called, an `unknownMethod` error (this is the type shown in the example above) MUST be inserted and then the next method call MUST be processed as normal.
+
+If an unknown argument or invalid arguments (wrong type, or in violation of other specified constraints) are supplied to a method, an `invalidArguments` error MUST be inserted and then the next method call MUST be processed as normal.
+
+## Vendor-specific extensions
+
+Individual services will have custom features they wish to expose over JMAP. This may take the form of extra datatypes and/or methods not in the spec, or extra arguments to JMAP methods, or extra properties on existing data types (which may also appear in arguments to methods that take property names). To ensure compatibility with clients that don't know about a specific custom extension, and for compatibility with future versions of JMAP, the server MUST ONLY expose these extensions if the client explicitly opts in. Without opt-in, the server MUST follow the spec and reject anything that does not conform to it as specified.
+
+## Security
+
+As always, the server must be strict about data received from the client. Arguments need to be checked for validity; a malicious user could attempt to find an exploit through the API. In case of invalid arguments (unknown/insufficient/wrong type for data etc.) the method MUST return an `invalidArguments` error and terminate.
+
+## Concurrency
+
+To ensure the client always sees a consistent view of the data, the state accessed by a method call MUST NOT change during the execution of the method, except due to actions by the method call itself. The state MAY change in-between method calls (even within a single API request).
+
+## The Number datatype
+
+The JSON datatypes are limited to those found in JavaScript. A `Number` in JavaScript is represented as a signed double (64-bit floating point). However, except where explicitly specified, all numbers used in this API are unsigned integers <= 2^53 (the maximum integer that may be reliably stored in a double). This implicitly limits the maximum length of message lists in queries and the like.
+
+## The Date datatypes
+
+Where a JMAP API specifies `Date` as a type, it means a string in [@!RFC3339] *date-time* format, with the *time-offset* component always `Z` (i.e. the date-time MUST be in UTC time) and *time-secfrac* always omitted. The "T" and "Z" MUST always be upper-case. For example, `"2014-10-30T14:12:00Z"`.
+
+## Use of null
+
+Unless otherwise specified, a missing property in the arguments object of a request (from the client), or a response (from the server) MUST be intepreted exactly the same as that property having the value `null`.
+
+Unless otherwise specified, a missing property in a data object MUST be interpreted in the following ways:
+- In the response to a *getFoos* style call, or when **creating** an object in a *setFoos* style call, a missing property MUST be interpreted as though it had the default value for that type, or `null` if no default is specified.
+- When **updating** an object in a *setFoos* style call, a missing property MUST be interpreted as the existing value for that property (i.e. don't update it).
+
+For network efficiency, when fetching the server and client may make use of the above and omit properties which have the default value for the data type.
+
+## CRUD methods
+
+JMAP provides a uniform interface for creating, retrieving, updating and deleting various types of objects. For a `Foo` data type, records of that type would be fetched via a `getFoos` call and modified via a `setFoos` call. Delta updates may be fetched via a `getFooUpdates` call. These methods all follow a standard format as described below.
+
+### getFoos
+
+Objects of type **Foo** are fetched via a call to *getFoos*. Methods with a name starting with `get` MUST NOT alter state on the server.
+
+This method may take some or all of the following arguments; see the definition of the data type in question. However, if one of the following arguments is available, it will behave exactly as specified below.
+
+- **accountId**: `String|null`
+  The id of the Account to use. If `null`, the primary account is used.
+- **ids**: `String[]|null`
+  The ids of the Foo objects to return. If `null` then **all** records of the data type are returned, if this is supported for that data type.
+- **properties**: `String[]|null`
+  If supplied, only the properties listed in the array are returned for each Foo object. If `null`, all properties of the object are returned. The id of the object is **always** returned, even if not explicitly requested.
+
+The response to `getFoos` is called `foos`. It has the following arguments:
+
+- **accountId**: `String`
+  The id of the account used for the call.
+- **state**: `String`
+  A string representing the state on the server for **all** the data of this type. If the data changes, this string will change. It is used to get delta updates, if supported for the type.
+- **list**: `Foo[]`
+  An array of the Foo objects requested. This is the **empty array** if no objects were found, or if the *ids* argument passed in was also the empty array.
+- **notFound**: `String[]|null`
+  This array contains the ids passed to the method for records that do not exist. This property is `null` if all requested ids were found, or if the *ids* argument passed in was either `null` or the empty array.
+
+The following error may be returned instead of the `foos` response:
+
+`accountNotFound`: Returned if an *accountId* was explicitly included with the request, but it does not correspond to a valid account.
+
+`accountNotSupportedByMethod`: Returned if the *accountId* given corresponds to a valid account, but the account does not support this data type.
+
+`requestTooLarge`: Returned if the number of *ids* requested by the client exceeds the maximum number the server is willing to process in a single method call.
+
+`invalidArguments`: Returned if one of the arguments is of the wrong type, or otherwise invalid. A `description` property MAY be present on the response object to help debug with an explanation of what the problem was.
+
+### getFooUpdates
+
+When the state of the set of Foo records changes on the server (whether due to creation, updates or deletion), the *state* property of the *foos* response will change. The *getFooUpdates* call allows a client to efficiently update the state of any its Foo cache to match the new state on the server. It takes the following arguments:
+
+- **accountId**: `String|null`
+  The id of the Account to use. If `null`, the primary account is used.
+- **sinceState**: `String`
+  The current state of the client. This is the string that was returned as the *state* argument in the *foos* response. The server will return the changes made since this state.
+- **maxChanges**: `Number|null`
+  The maximum number of Foo ids to return in the response. The server MAY choose to return fewer than this value, but MUST NOT return more. If not given by the client, the server may choose how many to return. If supplied by the client, the value MUST be a positive integer greater than 0. If a value outside of this range is given, the server MUST reject the call with an `invalidArguments` error.
+- **fetchRecords**: `Boolean|null`
+  If `true`, immediately after outputting the *fooUpdates* response, the server will make an implicit call to *getFoos* with the *changed* property of the response as the *ids* argument. If `false` or `null`, no implicit call will be made.
+- **fetchRecordProperties**: `String[]|null`
+  If the *getFoos* method takes a *properties* argument, this argument is passed through on implicit calls (see the *fetchRecords* argument).
+
+The response to *getFooUpdates* is called *fooUpdates*. It has the following arguments:
+
+- **accountId**: `String`
+  The id of the account used for the call.
+- **oldState**: `String`
+  This is the *sinceState* argument echoed back; the state from which the server is returning changes.
+- **newState**: `String`
+  This is the state the client will be in after applying the set of changes to the old state.
+- **hasMoreUpdates**: `Boolean`
+  If `true`, the client may call *getFooUpdates* again with the *newState* returned to get further updates. If `false`, *newState* is the current server state.
+- **changed**: `String[]`
+  An array of Foo ids for records which have been created or changed but not destroyed since the oldState.
+- **removed**: `String[]`
+  An array of Foo ids for records which have been destroyed since the old state.
+
+The *maxChanges* argument (and *hasMoreUpdates* response argument) is available for data types with potentially large amounts of data (i.e. those for which there is a *getFooList* method available for loading the data in pages).  If a *maxChanges* is supplied, or set automatically by the server, the server must try to limit the number of ids across *changed* and *removed* to the number given. If there are more changes than this between the client's state and the current server state, the update returned MUST take the client to an intermediate state, from which the client can continue to call *getFooUpdates* until it is fully up to date. The server MUST NOT return more ids than the *maxChanges* total. If the server is unable to calculate a suitable intermediate state, it MUST return a `cannotCalculateChanges` error.
+
+If a Foo record has been modified AND deleted since the oldState, the server SHOULD just return the id in the *removed* response, but MAY return it in the changed response as well. If a Foo record has been created AND deleted since the oldState, the server SHOULD remove the Foo id from the response entirely, but MAY include it in the *removed* response.
+
+The following errors may be returned instead of the *fooUpdates* response:
+
+`accountNotFound`: Returned if an *accountId* was explicitly included with the request, but it does not correspond to a valid account.
+
+`accountNotSupportedByMethod`: Returned if the *accountId* given corresponds to a valid account, but the account does not support this data type.
+
+`invalidArguments`: Returned if the request does not include one of the required arguments, or one of the arguments is of the wrong type, or otherwise invalid. A *description* property MAY be present on the response object to help debug with an explanation of what the problem was.
+
+`cannotCalculateChanges`: Returned if the server cannot calculate the changes from the state string given by the client. Usually due to the client's state being too old, or the server being unable to produce an update to an intermediate state when there are too many updates. The client MUST invalidate its Foo cache.
+
+### setFoos
+
+Modifying the state of Foo objects on the server is done via the *setFoos* method. This encompasses creating, updating and destroying Foo records. This has two benefits:
+
+1. It allows the server to sort out ordering and dependencies that may exist if doing multiple operations at once (for example to ensure there is always a minimum number of a certain record type).
+2. A single call can make all the changes you want to a particular type. If the client wants to use *ifInState* to guard its changes, it is only possible for it to make one call that modifies any particular type per request, since it will need the new state following that call to make the next modification.
+
+The *setFoos* method takes the following arguments:
+
+- **accountId**: `String|null`
+  The id of the Account to use. If `null`, the primary account is used.
+- **ifInState**: `String|null`
+  This is a state string as returned by the *getFoos* method. If supplied, the string must match the current state, otherwise the method will be aborted and a `stateMismatch` error returned. If `null`, any changes will be applied to the current state.
+- **create**: `String[Foo]|null`
+  A map of *creation id* (an arbitrary string set by the client) to Foo objects (containing all properties except the id, unless otherwise stated in the specific documentation of the data type). If `null`, no objects will be created.
+- **update**: `String[Foo]|null`
+  A map of id to Foo objects. The object may omit any property; only properties that have changed need be included. If `null`, no objects will be updated.
+- **destroy**: `String[]|null`
+  A list of ids for Foo objects to permanently delete. If `null`, no objects will be deleted.
+
+Each create, update or destroy is considered an atomic unit. It is permissible for the server to commit some of the changes but not others, however it is not permissible to only commit part of an update to a single record (e.g. update a *name* property but not a *count* property, if both are supplied in the update object).
+
+If a create, update or destroy is rejected, the appropriate error MUST be added to the notCreated/notUpdated/notDestroyed property of the response and the server MUST continue to the next create/update/destroy. It does not terminate the method.
+
+If an id given cannot be found, the update or destroy MUST be rejected with a `notFound` set error.
+
+Some record objects may hold references to others (foreign keys). When records are created or modified, they may reference other records being created *in the same API request* by using the creation id prefixed with a `#`. The order of the method calls in the request by the client MUST be such that the record being referenced is created in the same or an earlier call. The server thus never has to look ahead. Instead, while processing a request (a series of method calls), the server MUST keep a simple map for the duration of the request of creation id to record id for each newly created record, so it can substitute in the correct value if necessary in later method calls. The type
+
+Creation ids are scoped by type; a separate `creation id -> id` map MUST be kept for each type. Foreign key references are always for a particular record type, so use of the same creation key in two different types cannot cause any ambiguity. Creation ids sent by the client SHOULD be unique within the single API request for a particular data type. If a creation id is reused for the same type, the server MUST map the creation id to the most recently created item with that id.
+
+The response to *setFoos* is called *foosSet*. It has the following arguments:
+
+- **accountId**: `String`
+  The id of the account used for the call.
+- **oldState**: `String|null`
+  The state string that would have been returned by *getFoos* before making the requested changes, or `null` if the server doesn't know what the previous state string was.
+- **newState**: `String`
+  The state string that will now be returned by *getFoos*.
+- **created**: `String[Foo]`
+  A map of the creation id to an object containing any **server-assigned** properties of the Foo object (including the id) for all successfully created records.
+- **updated**: `String[Foo|null]`
+  The *keys* in this map are the ids of all Foos that were successfully updated. Some data types may have properties which can only be determined by the server, and which may change as a result of the other properties being updated by the client. In this case, the *value* for the corresponding id in the map is an object containing the updated value of each property the **server changed** on the record. Otherwise (if no properties changed on the server other than those explicitly updated by the client), the value is `null`.
+- **destroyed**: `String[]`
+  A list of Foo ids for records that were successfully destroyed.
+- **notCreated**: `String[SetError]`
+  A map of creation id to a SetError object for each record that failed to be created. The possible errors are defined in the description of the method for specific data types.
+- **notUpdated**: `String[SetError]`
+  A map of Foo id to a SetError object for each record that failed to be updated. The possible errors are defined in the description of the method for specific data types.
+- **notDestroyed**: `String[SetError]`
+  A map of Foo id to a SetError object for each record that failed to be destroyed. The possible errors are defined in the description of the method for specific data types.
+
+A **SetError** object has the following properties:
+
+- **type**: `String`
+  The type of error.
+- **description**: `String|null`
+  A description of the error to display to the user.
+
+Other properties may also be present on the object, as described in the relevant methods.
+
+The following errors may be returned instead of the `foosSet` response:
+
+`accountNotFound`: Returned if an *accountId* was explicitly included with the request, but it does not correspond to a valid account.
+
+`accountNotSupportedByMethod`: Returned if the *accountId* given corresponds to a valid account, but the account does not support this data type.
+
+`accountReadOnly`: Returned if the account has isReadOnly == true.
+
+`requestTooLarge`: Returned if the total number of objects to create, update or destroy exceeds the maximum number the server is willing to process in a single method call.
+
+`invalidArguments`: Returned if one of the arguments is of the wrong type, or otherwise invalid. A `description` property MAY be present on the response object to help debug with an explanation of what the problem was.
+
+`stateMismatch`: Returned if an `ifInState` argument was supplied and it does not match the current state.
+
+## Querying data
+
+For data sets where the total amount of data is expected to be very small, clients can just fetch the complete set of data and then do any sorting/filtering locally. However, for large data sets (e.g. multi-gigabyte mailboxes), the client needs to be able to perform a query on the server for the data type.
+
+### getFooList
+
+A query on the set of Foos in an account is made by calling *getFooList*. This takes a number of arguments to determine which records to include, how they should be sorted, and which part of the result should be returned (the full list may be *very* long). The result is returned as a list of Foo ids. Optionally, the records themselves may be fetched at the same time.
+
+A call to *getFooList* takes the following arguments:
+
+- **filter**: `FilterCondition`
+  Determines the set of Foos returned in the results. This is an `object`, whose allowed properties and semantics depend on the data type.
+- **sort**: `String[]|null`
+  Lists the properties to compare between two Foo records to determine which comes first in the sort. If two Foo records have an identical value for the first property, the next property will be considered and so on. If all properties are the same (this includes the case where an empty array or `null` is given as the *sort* argument), the sort order is server-dependent, but MUST be stable between calls to `getFooList`.
+
+    Following each property name there MUST be a space and then either the string `asc` or `desc` to specify ascending or descending sort for that property. e.g. `[ "date desc", "name asc" ]`
+
+- **position**: `Number|null`
+  The 0-based index of the first id in the full list of results to return, presumed `0` if `null`. If a negative value is given, the call MUST be rejected with an `invalidArguments` error.
+- **limit**: `Number|null`
+  The maximum number of results to return. If `null`, no limit presumed. The server MAY choose to enforce a maximum `limit` argument. In this case, if a greater value is given (or if it is `null`), the limit should be clamped to the maximum; since the total number of results in the list is returned, the client can determine if it has received all the results. If a negative value is given, the call MUST be rejected with an `invalidArguments` error.
+- **fetchFoos**: `Boolean|null`
+  If `true` then after outputting a *fooList* response, an implicit call will be made to *getFoos* with the `fooIds` array in the response as the *ids* argument. If `false` or `null`, no implicit call will be made.
+- **fetchFooProperties**: `String[]|null`
+  The list of properties to fetch on any fetched foos. See *getFoos* for a full description.
+
+The response to a call to *getFooList* is called *fooList*. It has the following arguments:
+
+- **filter**: `FilterCondition`
+  The filter of the foo list. Echoed back from the call.
+- **sort**: `String[]|null`
+  A list of Foo property names used to sort by. Echoed back from the call.
+- **state**: `String`
+  A string encoding the current state on the server. This string will change if the results of the Foo list MAY have changed (for example, there has been a change to the state of the set of Foos; it does not guarantee that anything in the list has changed). It may be passed to *getFooListUpdates* to efficiently get the set of changes from the client's current state.
+
+    Should a client receive back a response with a different state string to a previous call, it MUST either throw away the currently cached list and fetch it again (note, this does not require fetching the foos again, just the list of ids) or, call *getFooListUpdates* to get the delta difference.
+
+- **canCalculateUpdates**: `Boolean`
+  This is `true` if the server supports calling *getFooListUpdates* with these `filter`/`sort` parameters. Note, this does not guarantee that the *getFooListUpdates* call will succeed, as it may only be possible for a limited time afterwards due to server internal implementation details.
+- **position**: `Number`
+  The 0-based index of the first result in the `fooIds` array within the complete list of results.
+- **total**: `Number`
+  The total number of foos in the foos list (given the *filter*).
+- **fooIds**: `String[]`
+  The list of Foo ids for each foo in the list after filtering and sorting, starting at the index given by the *position* argument of this response, and continuing until it hits the end of the list or reaches the `limit` number of ids.
+
+The following errors may be returned instead of the `fooList` response:
+
+`accountNotFound`: Returned if an *accountId* was explicitly included with the request, but it does not correspond to a valid account.
+
+`accountNotSupportedByMethod`: Returned if the *accountId* given corresponds to a valid account, but the account does not support this data type.
+
+`invalidArguments`: Returned if the request does not include one of the required arguments, or one of the arguments is of the wrong type, or otherwise invalid. A `description` property MAY be present on the response object to help debug with an explanation of what the problem was.
+
+### getFooListUpdates
+
+The `getFooListUpdates` call allows a client to efficiently update the state of any cached foo list to match the new state on the server. It takes the following arguments:
+
+- **filter**: `FilterCondition`
+  The filter argument that was used with *getFooList*.
+- **sort**: `String[]|null`
+  The sort argument that was used with *getFooList*.
+- **sinceState**: `String`
+  The current state of the client. This is the string that was returned as the *state* argument in the *fooList* response. The server will return the changes made since this state.
+- **maxChanges**: `Number|null`
+  The maximum number of changes to return in the response. See below for a more detailed description.
+
+The response to *getFooListUpdates* is called *fooListUpdates* It has the following arguments:
+
+- **filter**: `FilterCondition`
+  The filter of the foo list. Echoed back from the call.
+- **sort**: `String[]|null`
+  A list of Foo property names used to sort by. Echoed back from the call.
+- **oldState**: `String`
+  This is the `sinceState` argument echoed back; the state from which the server is returning changes.
+- **newState**: `String`
+  This is the state the client will be in after applying the set of changes to the old state.
+- **total**: `Number`
+  The total number of foos in the current foo list (given the *filter*).
+- **removed**: `String[]`
+  The *fooId* for every foo that was in the list in the old state and is not in the list in the new state. If the server cannot calculate this exactly, the server MAY return extra foos in addition that MAY have been in the old list but are not in the new list.
+
+    If the *filter* or *sort* includes a mutable property, the server MUST include all foos in the current list for which this property MAY have changed.
+
+- **added**: `AddedItem[]`
+  The fooId and index in the list (in the new state) for every foo that has been added to the list since the old state AND every foo in the current list that was included in the *removed* array (due to a filter or sort based upon a mutable property). The array MUST be sorted in order of index, lowest index first.
+
+  An **AddedItem** object has the following properties:
+
+  - **fooId**: `String`
+  - **index**: `Number`
+
+The result of this should be that if the client has a cached sparse array of foo ids in the list in the old state:
+
+    fooIds = [ "id1", "id2", null, null, "id3", "id4", null, null, null ]
+
+then if it **splices out** all foos in the removed array:
+
+    removed = [ "id2", … ];
+    fooIds => [ "id1", null, null, "id3", "id4", null, null, null ]
+
+and **splices in** (in order) all of the foos in the added array:
+
+    added = [{ fooId: "id5", index: 0, … }];
+    fooIds => [ "id5", "id1", null, null, "id3", "id4", null, null, null ]
+
+then the foo list will now be in the new state.
+
+The following errors may be returned instead of the `fooListUpdates` response:
+
+`accountNotFound`: Returned if an *accountId* was explicitly included with the request, but it does not correspond to a valid account.
+
+`accountNotSupportedByMethod`: Returned if the *accountId* given corresponds to a valid account, but the account does not support this data type.
+
+`invalidArguments`: Returned if the request does not include one of the required arguments, or one of the arguments is of the wrong type, or otherwise invalid. A *description* property MAY be present on the response object to help debug with an explanation of what the problem was.
+
+`tooManyChanges`: Returned if there are more changes the the client's *maxChanges* argument. Each item in the removed or added array is considered as one change. The client may retry with a higher max changes or invalidate its cache of the foo list.
+
+`cannotCalculateChanges`: Returned if the server cannot calculate the changes from the state string given by the client. Usually due to the client's state being too old. The client MUST invalidate its cache of the foo list.
