@@ -1,0 +1,40 @@
+%%%
+    title = "JSON Meta Application Protocol"
+    abbrev = "JMAP"
+    category = "std"
+    docName = "draft-ietf-jmap-core-01"
+    ipr= "trust200902"
+    area = "Applications"
+    workgroup = "JMAP"
+    keyword = ["JMAP", "JSON"]
+
+    date = 2017-07-16T00:00:00Z
+
+    [[author]]
+    initials="N.M."
+    surname="Jenkins"
+    fullname="Neil Jenkins"
+    role="editor"
+    organization = "FastMail"
+        [author.address]
+        email = "neilj@fastmail.com"
+        uri = "https://www.fastmail.com"
+        [author.address.postal]
+            street = "Level 1, 91 William St"
+            city = "Melbourne"
+            code = "VIC 3000"
+            country = "Australia"
+%%%
+
+.# Abstract
+
+This document specifies a protocol for synchronising JSON-based data objects efficiently, with support for push and out-of-band binary data upload/download.
+
+{mainmatter}
+
+{{spec/jmap/intro.mdown}}
+{{spec/jmap/authentication.mdown}}
+{{spec/jmap/api.mdown}}
+{{spec/jmap/download.mdown}}
+{{spec/jmap/upload.mdown}}
+{{spec/jmap/push.mdown}}
